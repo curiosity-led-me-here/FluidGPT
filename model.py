@@ -15,16 +15,15 @@ def positional_encoding(seq_len, d_model, device='cpu'):
     return pe
 
 class GPT(nn.Module):
-  def __init__(self, input, vocab_size, block_size, embed_dim, num_heads, FFN_depth, encoder_layers=10):
+  def __init__(self, vocab_size, block_size, embed_dim, num_heads, FFN_depth, encoder_layers):
     super().__init__()
     self.block_size = block_size
     self.FFN_depth = FFN_depth
     self.num_heads = num_heads
     self.embed_dim = embed_dim
     self.encoder_layers = encoder_layers
-    self.x = input                                             # (B, n)
     self.token_emb = nn.Embedding(vocab_size, embed_dim)       # (v, d)
-    self.pos_emb = positional_encoding(block_size, embed_dim)  # (n, d)
+    self.register_buffer("pos_emb", positional_encoding(block_size, embed_dim))
     self.Wq = nn.Linear(embed_dim, embed_dim, bias=False)
     self.Wk = nn.Linear(embed_dim, embed_dim, bias=False)
     self.Wv = nn.Linear(embed_dim, embed_dim, bias=False)
@@ -76,10 +75,9 @@ class GPT(nn.Module):
     return LN(residue)
 
   def encoder_layer(self, X):
-    layer1 = self.layer_1(X)
-    q, k, v = self.single_head(layer1)
+    q, k, v = self.single_head(X)
     output = self.multi_head(q, k, v, "encode")
-    layer2 = self.add_and_layernorm(layer1, output, self.LN1)
+    layer2 = self.add_and_layernorm(X, output, self.LN1)
     ffn = self.ffn(layer2)
     return self.add_and_layernorm(layer2, ffn, self.LN2)
 
@@ -91,10 +89,9 @@ class GPT(nn.Module):
 
   def decoder_layer(self, y, Hl1):
     # 1. Masked self-attention (decoder-to-decoder)
-    T0 = self.layer_1(y)
-    q1, k1, v1 = self.single_head(T0)
+    q1, k1, v1 = self.single_head(y)
     self_attn_out = self.multi_head(q1, k1, v1, mode="decode")
-    x = self.add_and_layernorm(T0, self_attn_out, self.LN1)
+    x = self.add_and_layernorm(y, self_attn_out, self.LN1)
 
     # 2. Cross-attention (decoder-to-encoder)
     q2 = self.Wq(x)
@@ -107,13 +104,18 @@ class GPT(nn.Module):
     x = self.add_and_layernorm(x, ffn_out, self.LN2)
     return x
 
-  def stack_decoder_layer(self, y, X):
-    T0, Hl = y, X
+  def stack_decoder_layer(self, y, Hl1):
+    y = self.token_emb(y) * self.embed_dim ** 0.5
+    T = y.shape[1]
+    y = y + self.pos_emb[:T, :]
     for _ in range(self.encoder_layers):
-      T0 = self.decoder_layer(T0, Hl)
-    return T0
+        y = self.decoder_layer(y, Hl1)
+    return y
 
   def forward(self, x, y):
+    x = self.token_emb(x) * self.embed_dim ** 0.5
+    T = x.shape[1]
+    x = x + self.pos_emb[:T, :]
     Hl1 = self.stack_encoder(x)
     output = self.stack_decoder_layer(y, Hl1)
     logits = self.lastW(output)
